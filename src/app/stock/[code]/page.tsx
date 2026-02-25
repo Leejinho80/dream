@@ -2,9 +2,12 @@ import Link from "next/link";
 import StockChart from "@/components/stock/StockChart";
 import NewsList from "@/components/news/NewsList";
 import NewsAnalysis from "@/components/stock/NewsAnalysis";
-import type { StockHistory, NewsItem } from "@/types";
+import type { StockQuote, StockHistory, NewsItem } from "@/types";
 import { calcProfitRate, getSellTiming, getBuyTimingFromProfit, getBuyTimingFromHistory } from "@/lib/timing";
 import TimingSignal from "@/components/stock/TimingSignal";
+import { fetchStockQuote, fetchStockHistory } from "@/lib/yahoo-finance";
+import { fetchStockNews } from "@/lib/naver-rss";
+import { toYahooCode } from "@/lib/stock-utils";
 
 interface Props {
   params: { code: string };
@@ -13,44 +16,40 @@ interface Props {
 
 export const revalidate = 0;
 
-async function getStockData(code: string, market: string) {
-  const baseUrl =
-    process.env.NEXT_PUBLIC_BASE_URL ??
-    (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "http://localhost:3001");
+async function getStockData(code: string, market: "KOSPI" | "KOSDAQ") {
+  const yahooCode = toYahooCode(code, market);
 
-  const [priceRes, historyRes, newsRes] = await Promise.allSettled([
-    fetch(`${baseUrl}/api/stock/${code}/price?market=${market}`, {
-      cache: "no-store",
-    }),
-    fetch(`${baseUrl}/api/stock/${code}/history?market=${market}`, {
-      cache: "no-store",
-    }),
-    fetch(`${baseUrl}/api/news/${code}`, {
-      cache: "no-store",
-    }),
+  const [priceResult, historyResult, newsResult] = await Promise.allSettled([
+    fetchStockQuote(yahooCode),
+    fetchStockHistory(yahooCode),
+    fetchStockNews(code),
   ]);
 
-  const price = priceRes.status === "fulfilled" ? await priceRes.value.json() : null;
-  const historyData = historyRes.status === "fulfilled" ? await historyRes.value.json() : { history: [] };
-  const newsData = newsRes.status === "fulfilled" ? await newsRes.value.json() : { news: [] };
-
   return {
-    price,
-    history: (historyData.history ?? []) as StockHistory[],
-    news: (newsData.news ?? []) as NewsItem[],
+    price: priceResult.status === "fulfilled" ? priceResult.value : null,
+    history: historyResult.status === "fulfilled" ? historyResult.value : [] as StockHistory[],
+    news: newsResult.status === "fulfilled" ? newsResult.value : [] as NewsItem[],
   };
 }
 
 export default async function StockDetailPage({ params, searchParams }: Props) {
-  const market = searchParams.market ?? "KOSPI";
+  const market = (searchParams.market ?? "KOSPI") as "KOSPI" | "KOSDAQ";
   const avgPrice = searchParams.avgPrice ? Number(searchParams.avgPrice) : undefined;
-  const { price, history, news } = await getStockData(params.code, market);
+
+  let price: StockQuote | null = null;
+  let history: StockHistory[] = [];
+  let news: NewsItem[] = [];
+
+  try {
+    ({ price, history, news } = await getStockData(params.code, market));
+  } catch {
+    // 데이터 로드 실패 시 빈 상태로 렌더링
+  }
 
   const firstClose = history[0]?.close ?? 0;
   const lastClose = history[history.length - 1]?.close ?? 0;
   const chartColor = lastClose >= firstClose ? "#ef4444" : "#3b82f6";
 
-  // 타이밍 계산
   const currentPrice = price?.price ?? 0;
   const hasAvgPrice = avgPrice != null && avgPrice > 0;
   const profitRate = hasAvgPrice && currentPrice > 0
@@ -76,7 +75,7 @@ export default async function StockDetailPage({ params, searchParams }: Props) {
         </Link>
 
         {/* 종목 헤더 */}
-        {price && !price.error && (
+        {price ? (
           <div className="bg-gray-800 rounded-xl p-6 mb-6 border border-gray-700">
             <div className="flex flex-wrap justify-between items-start gap-4">
               <div>
@@ -94,15 +93,12 @@ export default async function StockDetailPage({ params, searchParams }: Props) {
                   <span className="text-sm text-gray-400 font-normal ml-1">원</span>
                 </div>
 
-                {/* 수익률 (평단가 있을 때) */}
                 {hasAvgPrice && profitRate !== null && (
                   <div className={`text-sm mt-1 font-semibold ${profitRate >= 0 ? "text-green-400" : "text-red-400"}`}>
-                    {profitRate >= 0 ? "+" : ""}{profitRate.toFixed(2)}%
-                    {" "}· 평단가 기준
+                    {profitRate >= 0 ? "+" : ""}{profitRate.toFixed(2)}%{" "}· 평단가 기준
                   </div>
                 )}
 
-                {/* 전일 등락률 */}
                 <div className={`text-sm mt-0.5 font-medium ${price.changePercent >= 0 ? "text-red-400" : "text-blue-400"}`}>
                   {price.changePercent >= 0 ? "▲" : "▼"}{" "}
                   {Math.abs(price.changePercent).toFixed(2)}%{" "}
@@ -118,7 +114,6 @@ export default async function StockDetailPage({ params, searchParams }: Props) {
               </div>
             </div>
 
-            {/* 타이밍 신호등 */}
             {buyTiming && (
               <div className="flex items-center gap-6 mt-5 pt-4 border-t border-gray-700">
                 <span className="text-xs text-gray-400">타이밍 분석</span>
@@ -131,6 +126,10 @@ export default async function StockDetailPage({ params, searchParams }: Props) {
               </div>
             )}
           </div>
+        ) : (
+          <div className="bg-gray-800 rounded-xl p-6 mb-6 border border-gray-700 text-gray-400">
+            종목 데이터를 불러올 수 없습니다. ({params.code} · {market})
+          </div>
         )}
 
         {/* 차트 */}
@@ -139,9 +138,8 @@ export default async function StockDetailPage({ params, searchParams }: Props) {
           <StockChart data={history} color={chartColor} avgPrice={avgPrice} />
         </section>
 
-        {/* 뉴스 + 분석 (PC: 2열, 모바일: 스택) */}
+        {/* 뉴스 + 분석 */}
         <div className="flex flex-col md:flex-row gap-6">
-          {/* 호재/악재 분석 */}
           <section className="md:w-2/5">
             <h2 className="text-lg font-semibold text-white mb-4">뉴스 분석</h2>
             {news.length > 0 ? (
@@ -151,7 +149,6 @@ export default async function StockDetailPage({ params, searchParams }: Props) {
             )}
           </section>
 
-          {/* 전체 뉴스 목록 */}
           <section className="md:flex-1">
             <h2 className="text-lg font-semibold text-white mb-4">관련 뉴스</h2>
             <NewsList news={news} />
