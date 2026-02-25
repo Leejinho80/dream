@@ -19,14 +19,18 @@ export const revalidate = 0;
 async function getStockData(code: string, market: "KOSPI" | "KOSDAQ") {
   const yahooCode = toYahooCode(code, market);
 
-  const [priceResult, historyResult, newsResult] = await Promise.allSettled([
-    fetchStockQuote(yahooCode),
+  // 먼저 가격 조회 (종목명 확보)
+  const price = await fetchStockQuote(yahooCode).catch(() => null);
+  const stockName = price?.name ?? "";
+
+  // 히스토리 + 종목명 기반 뉴스 병렬 조회
+  const [historyResult, newsResult] = await Promise.allSettled([
     fetchStockHistory(yahooCode),
-    fetchStockNews(code),
+    fetchStockNews(code, stockName),
   ]);
 
   return {
-    price: priceResult.status === "fulfilled" ? priceResult.value : null,
+    price,
     history: historyResult.status === "fulfilled" ? historyResult.value : [] as StockHistory[],
     news: newsResult.status === "fulfilled" ? newsResult.value : [] as NewsItem[],
   };

@@ -1,14 +1,15 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { fetchStockNews } from "@/lib/naver-rss";
 
 export const revalidate = 0;
 
 export async function GET(
-  _request: Request,
+  request: NextRequest,
   { params }: { params: { code: string } }
 ) {
   try {
-    const news = await fetchStockNews(params.code);
+    const name = request.nextUrl.searchParams.get("name") ?? undefined;
+    const news = await fetchStockNews(params.code, name);
     return NextResponse.json({ news }, {
       headers: {
         "Cache-Control": "no-store",
